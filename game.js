@@ -238,7 +238,9 @@
         'Następny poziom', () => { genLevel(level + 1); });
     } else {
       $('t' + testIdx).className = 'bad';
-      showOverlay('Most runął 💥', VEHICLES[testIdx].name + ' nie dojechał na drugą stronę. Wzmocnij konstrukcję.',
+      const sagged = sim.maxSag > sim.sagLimit && !sim.beams.some((b) => b.broken);
+      showOverlay(sagged ? 'Most ugiął się za bardzo' : 'Most runął 💥',
+        VEHICLES[testIdx].name + (sagged ? ' zapadł się w pomost (' + sim.maxSag.toFixed(1) + ' px, limit ' + sim.sagLimit.toFixed(1) + ' px). Luźny łańcuch belek nie wystarczy — użyj usztywnień (trójkątów).' : ' nie dojechał na drugą stronę. Wzmocnij konstrukcję.'),
         'Popraw most', () => { backToBuild(); });
     }
     vehicle = null;
@@ -450,9 +452,9 @@
       if (vehicle) drawVehicle(vehicle);
       drawBeams(sim.nodes, sim.beams, true);
       if (vehicle) {
-        ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(10, 10, 230, 28);
+        ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(10, 10, 420, 28);
         ctx.fillStyle = '#fff'; ctx.font = '14px system-ui';
-        ctx.fillText(VEHICLES[testIdx].name + ' — największe obciążenie: ' + Math.round(sim.maxRatio * 100) + '%', 18, 29);
+        ctx.fillText(VEHICLES[testIdx].name + ' — największe obciążenie: ' + Math.round(sim.maxRatio * 100) + '%, ugięcie ' + sim.maxSag.toFixed(1) + '/' + sim.sagLimit.toFixed(1) + ' px', 18, 29);
       }
     }
     if (flashT > 0) {

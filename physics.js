@@ -12,7 +12,7 @@
   // lc: długość, powyżej której belka wyboczy się przy ściskaniu, cost: koszt za px
   const MATERIALS = [
     { id: 'wood', name: 'Drewno', color: '#b9824a', dens: 0.05, ea: 3e5, str: 40000, lc: 34, cost: 1.0, maxLen: 60, w: 5 },
-    { id: 'steel', name: 'Stal', color: '#9aa7b5', dens: 0.11, ea: 1.5e6, str: 110000, lc: 60, cost: 2.4, maxLen: 80, w: 4 },
+    { id: 'steel', name: 'Stal', color: '#9aa7b5', dens: 0.11, ea: 1.5e6, str: 240000, lc: 60, cost: 2.4, maxLen: 80, w: 4 },
     { id: 'bamboo', name: 'Bambus', color: '#9bc255', dens: 0.025, ea: 1.5e5, str: 24000, lc: 30, cost: 0.6, maxLen: 50, w: 4 },
     { id: 'alu', name: 'Aluminium', color: '#d7e3ee', dens: 0.04, ea: 7e5, str: 65000, lc: 44, cost: 1.9, maxLen: 70, w: 4 },
   ];
@@ -20,7 +20,7 @@
   const VEHICLES = [
     {
       id: 'car', name: 'Samochód', speed: 130, len: 56,
-      axles: [{ dx: -16, w: 3 }, { dx: 16, w: 3 }],
+      axles: [{ dx: -16, w: 6 }, { dx: 16, w: 6 }],
     },
     {
       id: 'truck', name: 'Ciężarówka', speed: 95, len: 100,
@@ -93,6 +93,10 @@
       this.debris = [];
       this.maxRatio = 0;
       this.noBreak = false;
+      this.span = terrain.filter((h) => !isFinite(h)).length * CELL;
+      this.sagLimit = 1 + 0.005 * this.span;
+      this.maxSag = 0;
+      this.origY = this.nodes.map((n) => n.y);
     }
 
     // Ustabilizowanie od ciężaru własnego, bez łamania belek
@@ -101,6 +105,8 @@
       for (let i = 0; i < 120; i++) this.step(1 / 60, []);
       this.noBreak = false;
       for (const b of this.beams) b.ratio = 0;
+      this.origY = this.nodes.map((n) => n.y);
+      this.maxSag = 0;
     }
 
     surfaceAt(x) {
@@ -196,6 +202,7 @@
         if (b.ratio > maxR) maxR = b.ratio;
       }
       this.maxRatio = maxR;
+      this.nodes.forEach((n, i) => { if (!n.fixed) this.maxSag = Math.max(this.maxSag, n.y - this.origY[i]); });
     }
   }
 
@@ -247,6 +254,7 @@
         this.angle += 1.2 * dt;
       }
       if (this.y > WATER_Y + 10) this.failed = true;
+      if (this.sim.maxSag > this.sim.sagLimit || this.sim.beams.some((b) => b.broken)) this.failed = true;
       if (this.x - d.len / 2 > W) this.done = true;
       return loads;
     }
