@@ -122,11 +122,35 @@
     return null;
   }
 
-  function mousePt(e) {
+  // ---------- widok (zoom / przesuwanie) ----------
+  const view = { s: 1, x: 0, y: 0 };
+  const MAX_ZOOM = 5;
+  let deleteMode = false;
+
+  function clampView() {
+    view.s = clamp(view.s, 1, MAX_ZOOM);
+    view.x = clamp(view.x, W - W * view.s, 0);
+    view.y = clamp(view.y, H - H * view.s, 0);
+  }
+
+  function zoomAt(cx, cy, factor) {
+    const ns = clamp(view.s * factor, 1, MAX_ZOOM);
+    const wx = (cx - view.x) / view.s;
+    const wy = (cy - view.y) / view.s;
+    view.s = ns;
+    view.x = cx - wx * ns;
+    view.y = cy - wy * ns;
+    clampView();
+  }
+
+  function canvasPt(e) {
     const r = cv.getBoundingClientRect();
-    const x = ((e.clientX - r.left) / r.width) * W;
-    const y = ((e.clientY - r.top) / r.height) * H;
-    return { x, y };
+    return { x: ((e.clientX - r.left) / r.width) * W, y: ((e.clientY - r.top) / r.height) * H };
+  }
+
+  function mousePt(e) {
+    const c = canvasPt(e);
+    return { x: (c.x - view.x) / view.s, y: (c.y - view.y) / view.s };
   }
 
   function gridPt(e) {
@@ -136,17 +160,8 @@
     return { x: gx, y: gy, raw: m, state: pointState(terrain, gx, gy) };
   }
 
-  cv.addEventListener('contextmenu', (e) => e.preventDefault());
-  cv.addEventListener('pointermove', (e) => { hover = gridPt(e); });
-  cv.addEventListener('pointerleave', () => { hover = null; });
-  cv.addEventListener('pointerdown', (e) => {
-    if (mode !== 'build') return;
-    const g = gridPt(e);
-    if (e.button === 2) {
-      if (pending) { pending = null; return; }
-      removeBeamNear(g.raw);
-      return;
-    }
+  // Klik/tap w punkt siatki: pierwszy ustawia początek, kolejne dokładają belkę
+  function placePoint(g, chain) {
     if (g.state === 'blocked') return;
     if (!pending) { pending = { x: g.x, y: g.y }; return; }
     const err = beamCheck(pending, g);
@@ -156,9 +171,106 @@
     const a = getNode(pending.x, pending.y);
     const b = getNode(g.x, g.y);
     design.beams.push({ a, b });
-    pending = { x: g.x, y: g.y };
+    pending = chain ? { x: g.x, y: g.y } : null;
     updateHud();
+  }
+
+  const pointers = new Map();
+  let gesture = null;
+  let touchStart = null;
+  const DRAG_PX = 10;
+
+  function beginGesture() {
+    const [p, q] = [...pointers.values()];
+    const a = canvasPt(p);
+    const b = canvasPt(q);
+    gesture = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+    touchStart = null;
+  }
+
+  cv.addEventListener('contextmenu', (e) => e.preventDefault());
+  cv.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const c = canvasPt(e);
+    zoomAt(c.x, c.y, e.deltaY < 0 ? 1.2 : 1 / 1.2);
+  }, { passive: false });
+
+  cv.addEventListener('pointermove', (e) => {
+    if (pointers.has(e.pointerId)) pointers.set(e.pointerId, e);
+    if (gesture && pointers.size >= 2) {
+      const [p, q] = [...pointers.values()];
+      const a = canvasPt(p);
+      const b = canvasPt(q);
+      const d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      const mx = (a.x + b.x) / 2;
+      const my = (a.y + b.y) / 2;
+      view.x += mx - gesture.mx;
+      view.y += my - gesture.my;
+      zoomAt(mx, my, d / gesture.d);
+      gesture.d = d; gesture.mx = mx; gesture.my = my;
+      return;
+    }
+    hover = gridPt(e);
+    if (touchStart && touchStart.id === e.pointerId && !touchStart.moved) {
+      const c = canvasPt(e);
+      if (Math.hypot(c.x - touchStart.cx, c.y - touchStart.cy) > DRAG_PX * (W / cv.getBoundingClientRect().width)) {
+        touchStart.moved = true;
+        if (!deleteMode && !pending && touchStart.g.state !== 'blocked') pending = { x: touchStart.g.x, y: touchStart.g.y };
+      }
+    }
   });
+
+  cv.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') hover = null; });
+
+  cv.addEventListener('pointerdown', (e) => {
+    if (mode !== 'build') return;
+    try { cv.setPointerCapture(e.pointerId); } catch (err) { /* zdarzenie bez aktywnego wskaźnika */ }
+    pointers.set(e.pointerId, e);
+    if (e.pointerType === 'touch' || e.pointerType === 'pen') {
+      if (pointers.size >= 2) { beginGesture(); return; }
+      const c = canvasPt(e);
+      hover = gridPt(e);
+      touchStart = { id: e.pointerId, g: hover, cx: c.x, cy: c.y, moved: false, hadPending: !!pending };
+      return;
+    }
+    const g = gridPt(e);
+    if (e.button === 2) {
+      if (pending) { pending = null; return; }
+      removeBeamNear(g.raw);
+      return;
+    }
+    if (deleteMode) { removeBeamNear(g.raw); return; }
+    placePoint(g, true);
+  });
+
+  function endPointer(e) {
+    pointers.delete(e.pointerId);
+    if (gesture && pointers.size < 2) gesture = null;
+    if (!touchStart || touchStart.id !== e.pointerId) return;
+    const ts = touchStart;
+    touchStart = null;
+    if (mode !== 'build' || e.type === 'pointercancel') return;
+    const g = gridPt(e);
+    if (deleteMode) { removeBeamNear(g.raw); return; }
+    if (ts.moved) {
+      // przeciągnięcie: belka od punktu startu do puszczenia palca
+      if (pending && (g.x !== pending.x || g.y !== pending.y)) placePoint(g, false);
+      else pending = ts.hadPending ? pending : null;
+    } else {
+      placePoint(g, true);
+    }
+  }
+  cv.addEventListener('pointerup', endPointer);
+  cv.addEventListener('pointercancel', endPointer);
+
+  $('zin').onclick = () => zoomAt(W / 2, H / 2, 1.5);
+  $('zout').onclick = () => zoomAt(W / 2, H / 2, 1 / 1.5);
+  $('zreset').onclick = () => { view.s = 1; view.x = 0; view.y = 0; };
+  $('del').onclick = () => {
+    deleteMode = !deleteMode;
+    pending = null;
+    $('del').classList.toggle('on', deleteMode);
+  };
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') pending = null;
     if (e.key === 'z' && (e.ctrlKey || e.metaKey)) undo();
@@ -208,6 +320,7 @@
   $('test').onclick = () => {
     if (mode !== 'build' || !design.beams.length) return;
     pending = null;
+    view.s = 1; view.x = 0; view.y = 0;
     mode = 'test';
     resetTestBadges();
     sim = new Sim(terrain, mat, JSON.parse(JSON.stringify(design)));
@@ -238,7 +351,9 @@
         'Następny poziom', () => { genLevel(level + 1); });
     } else {
       $('t' + testIdx).className = 'bad';
-      showOverlay('Most runął 💥', VEHICLES[testIdx].name + ' nie dojechał na drugą stronę. Wzmocnij konstrukcję.',
+      const sagged = sim.maxSag > sim.sagLimit && !sim.beams.some((b) => b.broken);
+      showOverlay(sagged ? 'Most ugiął się za bardzo' : 'Most runął 💥',
+        VEHICLES[testIdx].name + (sagged ? ' zapadł się w pomost (' + sim.maxSag.toFixed(1) + ' px, limit ' + sim.sagLimit.toFixed(1) + ' px). Luźny łańcuch belek nie wystarczy — użyj usztywnień (trójkątów).' : ' nie dojechał na drugą stronę. Wzmocnij konstrukcję.'),
         'Popraw most', () => { backToBuild(); });
     }
     vehicle = null;
@@ -416,6 +531,8 @@
   }
 
   function draw() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.setTransform(view.s, 0, 0, view.s, view.x, view.y);
     drawScene();
     if (mode === 'build') {
       ctx.fillStyle = 'rgba(255,255,255,.35)';
@@ -450,11 +567,13 @@
       if (vehicle) drawVehicle(vehicle);
       drawBeams(sim.nodes, sim.beams, true);
       if (vehicle) {
-        ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(10, 10, 230, 28);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(10, 10, 420, 28);
         ctx.fillStyle = '#fff'; ctx.font = '14px system-ui';
-        ctx.fillText(VEHICLES[testIdx].name + ' — największe obciążenie: ' + Math.round(sim.maxRatio * 100) + '%', 18, 29);
+        ctx.fillText(VEHICLES[testIdx].name + ' — największe obciążenie: ' + Math.round(sim.maxRatio * 100) + '%, ugięcie ' + sim.maxSag.toFixed(1) + '/' + sim.sagLimit.toFixed(1) + ' px', 18, 29);
       }
     }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     if (flashT > 0) {
       ctx.fillStyle = 'rgba(0,0,0,.65)'; ctx.fillRect(W / 2 - 130, 12, 260, 30);
       ctx.fillStyle = '#ff8a8a'; ctx.font = '15px system-ui'; ctx.textAlign = 'center';
