@@ -15,6 +15,7 @@
   let pending = null;
   let hover = null;
   let mode = 'build';
+  let tool = 'build'; // 'build' | 'pan' | 'del'
   let sim = null;
   let vehicle = null;
   let testIdx = 0;
@@ -27,16 +28,29 @@
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
   // ---------- poziomy ----------
+  // [rozpiętość w kratkach, materiał]. Budżet wynika z kosztu przykładowej
+  // kratownicy, która przechodzi wszystkie testy (z zapasem 50%).
+  const LEVELS = [
+    [6, 'wood'], [8, 'bamboo'], [10, 'wood'], [12, 'bamboo'], [12, 'alu'], [14, 'wood'],
+    [16, 'steel'], [18, 'alu'], [20, 'steel'], [22, 'alu'], [24, 'steel'], [26, 'steel'],
+  ];
+  const REF_COST = {
+    wood: { 6: 491, 8: 684, 10: 860, 12: 1036, 14: 1864, 16: 2456, 18: 3972, 20: 7100 },
+    bamboo: { 6: 306, 8: 412, 10: 518, 12: 960, 14: 1292, 16: 2124, 18: 3120 },
+    alu: { 6: 929, 8: 1264, 10: 1599, 12: 1934, 14: 2269, 16: 2604, 18: 2986, 20: 5884, 22: 6480, 24: 10158, 26: 14356 },
+    steel: { 6: 1176, 8: 1600, 10: 2024, 12: 2448, 14: 2872, 16: 3296, 18: 3720, 20: 4144, 22: 4616, 24: 7776, 26: 8432 },
+  };
+
   function genLevel(n) {
     level = n;
-    mat = MATERIALS[(n - 1) % MATERIALS.length];
-    const gap = Math.min(6 + 2 * (n - 1), 26);
+    const [gap, matId] = LEVELS[Math.min(n, LEVELS.length) - 1];
+    mat = MATERIALS.find((m) => m.id === matId);
     const left = clamp(Math.floor((COLS - gap) / 2) + rnd(-2, 2), 6, COLS - gap - 6);
     gapStart = left;
     gapEnd = left + gap;
-    const spread = Math.min(1 + n, 4);
+    const spread = Math.min(n - 1, 2);
     const hL = rnd(13, 17);
-    const hR = n === 1 ? hL : clamp(hL + rnd(-spread, spread), 10, 20);
+    const hR = clamp(hL + rnd(-spread, spread), 10, 20);
     terrain = new Array(COLS).fill(Infinity);
     let h = hL;
     for (let c = gapStart - 1; c >= 0; c--) {
@@ -48,7 +62,7 @@
       if (c > gapEnd && Math.random() < 0.3 && h > 9) h--;
       terrain[c] = h;
     }
-    budget = Math.round(gap * CELL * mat.cost * 8);
+    budget = Math.ceil((REF_COST[mat.id][gap] * 1.5) / 50) * 50;
     design = { nodes: [], beams: [] };
     undoStack = [];
     pending = null;
@@ -56,6 +70,7 @@
     sim = null;
     vehicle = null;
     resetTestBadges();
+    fitView();
     updateHud();
   }
 
@@ -71,14 +86,17 @@
     $('lvl').textContent = level;
     $('mat').textContent = mat.name;
     $('gap').textContent = (gapEnd - gapStart) * CELL + ' px';
-    $('budget').textContent = budget - spent() + ' / ' + budget;
+    const left = budget - spent();
+    $('budget').textContent = left + ' / ' + budget;
+    $('budget').classList.toggle('low', left < budget * 0.1);
     $('test').disabled = mode !== 'build' || design.beams.length === 0;
     $('undo').disabled = mode !== 'build' || !undoStack.length;
     $('clear').disabled = mode !== 'build' || !design.beams.length;
+    for (const id of ['tBuild', 'tDel']) $(id).disabled = mode !== 'build';
   }
 
   function resetTestBadges() {
-    for (let i = 0; i < 3; i++) $('t' + i).className = '';
+    for (let i = 0; i < VEHICLES.length; i++) $('t' + i).className = '';
   }
 
   // ---------- edycja ----------
@@ -122,19 +140,50 @@
     return null;
   }
 
-  // ---------- widok (zoom / przesuwanie) ----------
+  // ---------- płótno i widok (zoom / przesuwanie) ----------
+  // Współrzędne „ekranu” to zawsze przestrzeń 1000×600 (W×H) niezależnie od
+  // rozmiaru płótna; px = ile pikseli płótna przypada na jednostkę ekranu.
   const view = { s: 1, x: 0, y: 0 };
-  const MAX_ZOOM = 5;
-  let deleteMode = false;
+  const MAX_ZOOM = 8;
+  let px = 1;
+  let cssScale = 1; // piksele CSS na jednostkę ekranu
+  let SH = H; // wysokość ekranu w jednostkach (szerokość zawsze W)
+
+  function resize() {
+    const wrap = $('wrap');
+    const aw = wrap.clientWidth;
+    const ah = wrap.clientHeight;
+    // proporcje płótna: od 5:3 (poziomo) do 4:5 (telefon w pionie)
+    let cw = aw;
+    let ch = Math.min(ah, aw * 1.25);
+    if (ch < (aw * H) / W) cw = (ch * W) / H;
+    cw = Math.max(1, Math.floor(cw));
+    ch = Math.max(1, Math.floor(ch));
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    cv.style.width = cw + 'px';
+    cv.style.height = ch + 'px';
+    cv.width = Math.round(cw * dpr);
+    cv.height = Math.round(ch * dpr);
+    px = cv.width / W;
+    cssScale = cw / W;
+    SH = (W * ch) / cw;
+    clampView();
+  }
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', () => setTimeout(resize, 200));
 
   function clampView() {
-    view.s = clamp(view.s, 1, MAX_ZOOM);
+    view.s = clamp(view.s, minZoom(), MAX_ZOOM);
     view.x = clamp(view.x, W - W * view.s, 0);
-    view.y = clamp(view.y, H - H * view.s, 0);
+    view.y = clamp(view.y, SH - H * view.s, 0);
+  }
+
+  function minZoom() {
+    return Math.max(1, SH / H);
   }
 
   function zoomAt(cx, cy, factor) {
-    const ns = clamp(view.s * factor, 1, MAX_ZOOM);
+    const ns = clamp(view.s * factor, minZoom(), MAX_ZOOM);
     const wx = (cx - view.x) / view.s;
     const wy = (cy - view.y) / view.s;
     view.s = ns;
@@ -143,21 +192,56 @@
     clampView();
   }
 
-  function canvasPt(e) {
-    const r = cv.getBoundingClientRect();
-    return { x: ((e.clientX - r.left) / r.width) * W, y: ((e.clientY - r.top) / r.height) * H };
+  // Dopasowanie widoku do przepaści z mostem (na telefonie to podstawowy widok)
+  function fitView() {
+    const x0 = (gapStart - 4) * CELL;
+    const x1 = (gapEnd + 4) * CELL;
+    const deck = Math.min(terrain[gapStart - 1], terrain[gapEnd]) * CELL;
+    let s = W / (x1 - x0);
+    s = clamp(s, minZoom(), 2.6);
+    view.s = s;
+    view.x = -((x0 + x1) / 2) * s + W / 2;
+    view.y = -(deck + 50) * s + SH / 2;
+    clampView();
   }
 
-  function mousePt(e) {
-    const c = canvasPt(e);
+  function canvasPt(e) {
+    const r = cv.getBoundingClientRect();
+    return { x: ((e.clientX - r.left) / r.width) * W, y: ((e.clientY - r.top) / r.height) * SH };
+  }
+
+  function toWorld(c) {
     return { x: (c.x - view.x) / view.s, y: (c.y - view.y) / view.s };
   }
 
+  // Najbliższy punkt siatki; gdy palec trafi w mur, szukamy obok punktu,
+  // na którym da się budować (np. kotwicy na krawędzi muru).
+  function gridAt(m) {
+    let best = null;
+    const cx = Math.round(m.x / CELL);
+    const cy = Math.round(m.y / CELL);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const gx = (cx + dx) * CELL;
+        const gy = (cy + dy) * CELL;
+        const st = pointState(terrain, gx, gy);
+        if (st === 'blocked') continue;
+        const d = Math.hypot(gx - m.x, gy - m.y);
+        if (d > CELL * 0.95) continue;
+        if (!best || d < best.d) best = { x: gx, y: gy, state: st, d };
+      }
+    }
+    if (!best) {
+      const gx = cx * CELL;
+      const gy = cy * CELL;
+      return { x: gx, y: gy, raw: m, state: pointState(terrain, gx, gy) };
+    }
+    best.raw = m;
+    return best;
+  }
+
   function gridPt(e) {
-    const m = mousePt(e);
-    const gx = Math.round(m.x / CELL) * CELL;
-    const gy = Math.round(m.y / CELL) * CELL;
-    return { x: gx, y: gy, raw: m, state: pointState(terrain, gx, gy) };
+    return gridAt(toWorld(canvasPt(e)));
   }
 
   // Klik/tap w punkt siatki: pierwszy ustawia początek, kolejne dokładają belkę
@@ -175,28 +259,61 @@
     updateHud();
   }
 
+  // ---------- wejście: mysz, dotyk, rysik ----------
   const pointers = new Map();
-  let gesture = null;
-  let touchStart = null;
-  const DRAG_PX = 10;
+  let gesture = null; // dwa palce: zoom + przesuwanie
+  let pan = null; // jeden wskaźnik przesuwa widok
+  let touchStart = null; // jeden palec w trybie budowania
+  let loupe = null; // {x, y} w przestrzeni ekranu — gdzie jest palec
+  const DRAG_CSS = 8;
 
   function beginGesture() {
     const [p, q] = [...pointers.values()];
     const a = canvasPt(p);
     const b = canvasPt(q);
     gesture = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+    if (touchStart && touchStart.moved) pending = touchStart.hadPending ? pending : null;
     touchStart = null;
+    pan = null;
+    loupe = null;
   }
 
   cv.addEventListener('contextmenu', (e) => e.preventDefault());
   cv.addEventListener('wheel', (e) => {
     e.preventDefault();
     const c = canvasPt(e);
-    zoomAt(c.x, c.y, e.deltaY < 0 ? 1.2 : 1 / 1.2);
+    if (e.ctrlKey) zoomAt(c.x, c.y, Math.exp(-e.deltaY * 0.01)); // gest szczypania na touchpadzie
+    else zoomAt(c.x, c.y, e.deltaY < 0 ? 1.2 : 1 / 1.2);
   }, { passive: false });
+
+  cv.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    try { cv.setPointerCapture(e.pointerId); } catch (err) { /* brak aktywnego wskaźnika */ }
+    pointers.set(e.pointerId, e);
+    if (pointers.size >= 2) { beginGesture(); return; }
+    const c = canvasPt(e);
+    const isMouse = e.pointerType === 'mouse';
+    // przesuwanie: narzędzie „Przesuń”, środkowy przycisk, albo podczas testu
+    if (tool === 'pan' || mode !== 'build' || (isMouse && e.button === 1)) {
+      pan = { id: e.pointerId, x: c.x, y: c.y };
+      cv.style.cursor = 'grabbing';
+      return;
+    }
+    const g = gridPt(e);
+    hover = g;
+    if (isMouse && e.button === 2) {
+      if (pending) { pending = null; return; }
+      removeBeamNear(g.raw);
+      return;
+    }
+    if (tool === 'del') { removeBeamNear(g.raw); return; }
+    touchStart = { id: e.pointerId, g, cx: c.x, cy: c.y, moved: false, hadPending: !!pending, mouse: isMouse };
+    if (!isMouse) loupe = c;
+  });
 
   cv.addEventListener('pointermove', (e) => {
     if (pointers.has(e.pointerId)) pointers.set(e.pointerId, e);
+    const c = canvasPt(e);
     if (gesture && pointers.size >= 2) {
       const [p, q] = [...pointers.values()];
       const a = canvasPt(p);
@@ -210,52 +327,46 @@
       gesture.d = d; gesture.mx = mx; gesture.my = my;
       return;
     }
+    if (pan && pan.id === e.pointerId) {
+      view.x += c.x - pan.x;
+      view.y += c.y - pan.y;
+      pan.x = c.x; pan.y = c.y;
+      clampView();
+      return;
+    }
+    if (mode !== 'build' || tool === 'pan') { hover = null; return; }
     hover = gridPt(e);
-    if (touchStart && touchStart.id === e.pointerId && !touchStart.moved) {
-      const c = canvasPt(e);
-      if (Math.hypot(c.x - touchStart.cx, c.y - touchStart.cy) > DRAG_PX * (W / cv.getBoundingClientRect().width)) {
+    if (touchStart && touchStart.id === e.pointerId) {
+      if (!touchStart.mouse) loupe = c;
+      if (!touchStart.moved && Math.hypot(c.x - touchStart.cx, c.y - touchStart.cy) * cssScale > DRAG_CSS) {
         touchStart.moved = true;
-        if (!deleteMode && !pending && touchStart.g.state !== 'blocked') pending = { x: touchStart.g.x, y: touchStart.g.y };
+        // przeciąganie zaczyna nową belkę od punktu, w którym położono palec
+        if (touchStart.g.state !== 'blocked') pending = { x: touchStart.g.x, y: touchStart.g.y };
       }
     }
   });
 
-  cv.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') hover = null; });
-
-  cv.addEventListener('pointerdown', (e) => {
-    if (mode !== 'build') return;
-    try { cv.setPointerCapture(e.pointerId); } catch (err) { /* zdarzenie bez aktywnego wskaźnika */ }
-    pointers.set(e.pointerId, e);
-    if (e.pointerType === 'touch' || e.pointerType === 'pen') {
-      if (pointers.size >= 2) { beginGesture(); return; }
-      const c = canvasPt(e);
-      hover = gridPt(e);
-      touchStart = { id: e.pointerId, g: hover, cx: c.x, cy: c.y, moved: false, hadPending: !!pending };
-      return;
-    }
-    const g = gridPt(e);
-    if (e.button === 2) {
-      if (pending) { pending = null; return; }
-      removeBeamNear(g.raw);
-      return;
-    }
-    if (deleteMode) { removeBeamNear(g.raw); return; }
-    placePoint(g, true);
-  });
+  cv.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse' && !touchStart) hover = null; });
 
   function endPointer(e) {
     pointers.delete(e.pointerId);
-    if (gesture && pointers.size < 2) gesture = null;
+    if (gesture) {
+      if (pointers.size < 2) gesture = null;
+      // pozostały palec nie buduje, dopóki nie zostanie podniesiony
+      return;
+    }
+    if (pan && pan.id === e.pointerId) { pan = null; cv.style.cursor = ''; return; }
     if (!touchStart || touchStart.id !== e.pointerId) return;
     const ts = touchStart;
     touchStart = null;
+    loupe = null;
+    if (!ts.mouse) hover = null;
     if (mode !== 'build' || e.type === 'pointercancel') return;
     const g = gridPt(e);
-    if (deleteMode) { removeBeamNear(g.raw); return; }
     if (ts.moved) {
-      // przeciągnięcie: belka od punktu startu do puszczenia palca
+      // przeciągnięcie: belka od punktu startu do miejsca puszczenia
       if (pending && (g.x !== pending.x || g.y !== pending.y)) placePoint(g, false);
-      else pending = ts.hadPending ? pending : null;
+      else pending = null;
     } else {
       placePoint(g, true);
     }
@@ -263,22 +374,37 @@
   cv.addEventListener('pointerup', endPointer);
   cv.addEventListener('pointercancel', endPointer);
 
-  $('zin').onclick = () => zoomAt(W / 2, H / 2, 1.5);
-  $('zout').onclick = () => zoomAt(W / 2, H / 2, 1 / 1.5);
-  $('zreset').onclick = () => { view.s = 1; view.x = 0; view.y = 0; };
-  $('del').onclick = () => {
-    deleteMode = !deleteMode;
+  function setTool(t) {
+    tool = t;
     pending = null;
-    $('del').classList.toggle('on', deleteMode);
+    $('tBuild').classList.toggle('on', t === 'build');
+    $('tPan').classList.toggle('on', t === 'pan');
+    $('tDel').classList.toggle('on', t === 'del');
+    cv.className = t === 'pan' ? 'pan' : t === 'del' ? 'del' : '';
+  }
+  $('tBuild').onclick = () => setTool('build');
+  $('tPan').onclick = () => setTool(tool === 'pan' ? 'build' : 'pan');
+  $('tDel').onclick = () => setTool(tool === 'del' ? 'build' : 'del');
+
+  $('zin').onclick = () => zoomAt(W / 2, SH / 2, 1.4);
+  $('zout').onclick = () => zoomAt(W / 2, SH / 2, 1 / 1.4);
+  // ⤢: dopasuj do przepaści; drugie naciśnięcie pokazuje całą planszę
+  $('zfit').onclick = () => {
+    const before = view.s;
+    fitView();
+    if (Math.abs(before - view.s) < 0.01) { view.s = 0; view.x = 0; view.y = 0; clampView(); }
   };
+
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') pending = null;
     if (e.key === 'z' && (e.ctrlKey || e.metaKey)) undo();
+    if (e.key === '+' || e.key === '=') zoomAt(W / 2, SH / 2, 1.4);
+    if (e.key === '-') zoomAt(W / 2, SH / 2, 1 / 1.4);
   });
 
   function removeBeamNear(m) {
     let best = -1;
-    let bd = 10;
+    let bd = Math.max(8, 14 / (view.s * cssScale)); // ok. 14 px CSS tolerancji palca
     design.beams.forEach((b, i) => {
       const p = design.nodes[b.a];
       const q = design.nodes[b.b];
@@ -303,9 +429,14 @@
     updateHud();
   }
 
-  let flashMsg = '';
-  let flashT = 0;
-  function flash(t) { flashMsg = t; flashT = 1.5; }
+  let toastTimer = 0;
+  function flash(t) {
+    const el = $('toast');
+    el.textContent = t;
+    el.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 1600);
+  }
 
   $('undo').onclick = undo;
   $('clear').onclick = () => {
@@ -315,12 +446,15 @@
     pending = null;
     updateHud();
   };
+  $('helpOpen').onclick = () => { $('help').style.display = 'flex'; };
+  $('helpB').onclick = () => { $('help').style.display = 'none'; try { localStorage.setItem('zamki-help', '1'); } catch (e) { /* brak dostępu */ } };
 
   // ---------- test ----------
   $('test').onclick = () => {
     if (mode !== 'build' || !design.beams.length) return;
     pending = null;
-    view.s = 1; view.x = 0; view.y = 0;
+    touchStart = null;
+    loupe = null;
     mode = 'test';
     resetTestBadges();
     sim = new Sim(terrain, mat, JSON.parse(JSON.stringify(design)));
@@ -330,7 +464,9 @@
     updateHud();
   };
 
+  let failT = null; // odliczanie do komunikatu o porażce
   function startVehicle() {
+    failT = null;
     vehicle = new Vehicle(VEHICLES[testIdx], sim);
     testTime = 0;
     pauseT = 0;
@@ -347,13 +483,13 @@
         return;
       }
       showOverlay('Poziom ' + level + ' zaliczony! 🎉',
-        'Most wytrzymał samochód, ciężarówkę i czołg. W następnym poziomie zmieni się teren, odległość między zamkami i materiał.',
+        'Most wytrzymał samochód i ciężarówkę.',
         'Następny poziom', () => { genLevel(level + 1); });
     } else {
       $('t' + testIdx).className = 'bad';
-      const sagged = sim.maxSag > sim.sagLimit && !sim.beams.some((b) => b.broken);
+      const sagged = sim.sagFailed;
       showOverlay(sagged ? 'Most ugiął się za bardzo' : 'Most runął 💥',
-        VEHICLES[testIdx].name + (sagged ? ' zapadł się w pomost (' + sim.maxSag.toFixed(1) + ' px, limit ' + sim.sagLimit.toFixed(1) + ' px). Luźny łańcuch belek nie wystarczy — użyj usztywnień (trójkątów).' : ' nie dojechał na drugą stronę. Wzmocnij konstrukcję.'),
+        VEHICLES[testIdx].name + (sagged ? ': ugięcie ' + sim.sagAtFail.toFixed(1) + ' px (limit ' + sim.sagLimit.toFixed(1) + '). Dodaj trójkąty nad lub pod pomostem.' : ' nie dojechał — pękła belka. Wzmocnij konstrukcję.'),
         'Popraw most', () => { backToBuild(); });
     }
     vehicle = null;
@@ -374,6 +510,7 @@
     $('msgB').textContent = b;
     overlayAction = action;
     $('msg').style.display = 'flex';
+    $('status').style.display = 'none';
   }
   $('msgB').onclick = () => {
     $('msg').style.display = 'none';
@@ -387,14 +524,15 @@
     const dt = Math.min(0.033, (now - last) / 1000);
     last = now;
     clock += dt;
-    if (flashT > 0) flashT -= dt;
     if (mode === 'test' && sim) {
       if (vehicle) {
         testTime += dt;
         const loads = vehicle.update(dt);
         sim.step(dt, loads);
-        if (vehicle.failed || testTime > 40) endTest(false);
-        else if (vehicle.done) endTest(true);
+        if (vehicle.damaged && failT === null) failT = 2.2;
+        if (failT !== null) failT -= dt;
+        if (vehicle.failed || testTime > 40 || (failT !== null && failT <= 0)) endTest(false);
+        else if (vehicle.done) endTest(!vehicle.damaged);
       } else {
         sim.step(dt, []);
         pauseT -= dt;
@@ -404,6 +542,13 @@
     } else if (mode === 'over' && sim) {
       sim.step(dt, []);
       for (const d of sim.debris) d.t += dt;
+    }
+    const st = $('status');
+    if (mode === 'test' && vehicle) {
+      st.style.display = 'block';
+      st.textContent = VEHICLES[testIdx].name + ' · obciążenie ' + Math.round(sim.maxRatio * 100) + '% · ugięcie ' + sim.maxSag.toFixed(1) + '/' + sim.sagLimit.toFixed(1) + ' px';
+    } else {
+      st.style.display = 'none';
     }
     draw();
     requestAnimationFrame(frame);
@@ -530,31 +675,70 @@
     ctx.restore();
   }
 
-  function draw() {
+  // rozmiar w jednostkach świata odpowiadający danej liczbie pikseli CSS
+  function cssToWorld(n) { return n / (view.s * cssScale); }
+
+  function drawLoupe() {
+    const R = (58 / cssScale) * px; // promień lupy w pikselach płótna
+    const fx = loupe.x * px;
+    const fy = loupe.y * px;
+    let lx = fx;
+    let ly = fy - R * 2.1;
+    if (ly < R + 4) { ly = Math.max(R + 4, fy); lx = fx + (fx < cv.width / 2 ? 1 : -1) * R * 2.3; }
+    lx = clamp(lx, R + 4, cv.width - R - 4);
+    const mag = 2.2;
+    const src = R / mag;
+    ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.setTransform(view.s, 0, 0, view.s, view.x, view.y);
+    ctx.beginPath(); ctx.arc(lx, ly, R, 0, 7); ctx.closePath();
+    ctx.fillStyle = '#6fb1e8'; ctx.fill();
+    ctx.clip();
+    const sx = clamp(fx - src, 0, cv.width - 2 * src);
+    const sy = clamp(fy - src, 0, cv.height - 2 * src);
+    ctx.drawImage(cv, sx, sy, 2 * src, 2 * src, lx - R + (sx - (fx - src)) * mag, ly - R + (sy - (fy - src)) * mag, 2 * R, 2 * R);
+    ctx.restore();
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = Math.max(2, R * 0.04);
+    ctx.beginPath(); ctx.arc(lx, ly, R, 0, 7); ctx.stroke();
+    ctx.restore();
+  }
+
+  function draw() {
+    const k = px;
+    ctx.setTransform(k * view.s, 0, 0, k * view.s, k * view.x, k * view.y);
     drawScene();
     if (mode === 'build') {
-      ctx.fillStyle = 'rgba(255,255,255,.35)';
+      ctx.fillStyle = 'rgba(255,255,255,.5)';
+      const dot = clamp(cssToWorld(3), 1.5, 4);
       for (let gx = 0; gx <= W; gx += CELL) {
         for (let gy = 0; gy <= 26 * CELL; gy += CELL) {
-          if (pointState(terrain, gx, gy) === 'free') ctx.fillRect(gx - 1, gy - 1, 2, 2);
+          const st = pointState(terrain, gx, gy);
+          if (st === 'free') ctx.fillRect(gx - dot / 2, gy - dot / 2, dot, dot);
+        }
+      }
+      // kotwice na murach (tylko przy przepaści)
+      ctx.fillStyle = 'rgba(255,209,102,.7)';
+      for (const c of [gapStart, gapEnd]) {
+        for (let r = 0; r <= 26; r++) {
+          if (pointState(terrain, c * CELL, r * CELL) === 'anchor') ctx.fillRect(c * CELL - dot / 2, r * CELL - dot / 2, dot, dot);
         }
       }
       drawBeams(design.nodes, design.beams, false);
+      const rr = clamp(cssToWorld(10), 5, 12);
       if (pending) {
-        ctx.fillStyle = '#ff9f1c'; ctx.beginPath(); ctx.arc(pending.x, pending.y, 7, 0, 7); ctx.fill();
+        ctx.fillStyle = '#ff9f1c'; ctx.beginPath(); ctx.arc(pending.x, pending.y, rr * 0.8, 0, 7); ctx.fill();
         if (hover && hover.state !== 'blocked') {
           const err = beamCheck(pending, hover);
-          ctx.strokeStyle = err && err !== 'same' ? '#ff3b3b' : '#ffffff'; ctx.lineWidth = 3;
+          ctx.strokeStyle = err && err !== 'same' ? '#ff3b3b' : '#ffffff'; ctx.lineWidth = clamp(cssToWorld(3), 2, 4);
           ctx.setLineDash([6, 5]);
           ctx.beginPath(); ctx.moveTo(pending.x, pending.y); ctx.lineTo(hover.x, hover.y); ctx.stroke();
           ctx.setLineDash([]);
         }
       }
-      if (hover && hover.state !== 'blocked') {
-        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(hover.x, hover.y, 7, 0, 7); ctx.stroke();
+      if (hover && hover.state !== 'blocked' && tool === 'build') {
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = clamp(cssToWorld(2.5), 1.5, 3);
+        ctx.beginPath(); ctx.arc(hover.x, hover.y, rr, 0, 7); ctx.stroke();
       }
     } else if (sim) {
       for (const d of sim.debris) {
@@ -566,22 +750,17 @@
       }
       if (vehicle) drawVehicle(vehicle);
       drawBeams(sim.nodes, sim.beams, true);
-      if (vehicle) {
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(10, 10, 420, 28);
-        ctx.fillStyle = '#fff'; ctx.font = '14px system-ui';
-        ctx.fillText(VEHICLES[testIdx].name + ' — największe obciążenie: ' + Math.round(sim.maxRatio * 100) + '%, ugięcie ' + sim.maxSag.toFixed(1) + '/' + sim.sagLimit.toFixed(1) + ' px', 18, 29);
-      }
     }
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    if (flashT > 0) {
-      ctx.fillStyle = 'rgba(0,0,0,.65)'; ctx.fillRect(W / 2 - 130, 12, 260, 30);
-      ctx.fillStyle = '#ff8a8a'; ctx.font = '15px system-ui'; ctx.textAlign = 'center';
-      ctx.fillText(flashMsg, W / 2, 32); ctx.textAlign = 'left';
-    }
+    if (loupe && mode === 'build') drawLoupe();
   }
 
+  resize();
   genLevel(1);
+  try { if (!localStorage.getItem('zamki-help')) $('help').style.display = 'flex'; } catch (e) { /* brak dostępu */ }
   requestAnimationFrame(frame);
-  window.__game = { get mode() { return mode; }, get level() { return level; }, get design() { return design; }, get terrain() { return terrain; }, get mat() { return mat; }, genLevel };
+  window.__game = {
+    get mode() { return mode; }, get level() { return level; }, get design() { return design; },
+    get terrain() { return terrain; }, get mat() { return mat; }, get view() { return view; },
+    get gapStart() { return gapStart; }, get gapEnd() { return gapEnd; }, genLevel,
+  };
 })();
